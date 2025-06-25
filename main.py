@@ -333,6 +333,7 @@ class VehicleRoutingProblem:
             vehicle_id = route_index
             route_order = 1
 
+            # 시작 Depot 추가
             result_data.append({
                 'Vehicle_ID': vehicle_id,
                 'Route_Order': route_order,
@@ -370,17 +371,18 @@ class VehicleRoutingProblem:
                     'Order_Number': order_info['order_number'],
                     'Box_ID': order_info['box_id'],
                     'Stacking_Order': order_info['stacking_order'],
-                    'Lower_Left_X': order_info['position']['x'],
-                    'Lower_Left_Y': order_info['position']['y'],
-                    'Lower_Left_Z': order_info['position']['z'],
+                    'Lower_Left_X': order_info['position']['x'] / 100,  # cm를 m로 변환
+                    'Lower_Left_Y': order_info['position']['y'] / 100,  # cm를 m로 변환
+                    'Lower_Left_Z': order_info['position']['z'] / 100,  # cm를 m로 변환
                     'Longitude': dest_data['location']['longitude'],
                     'Latitude': dest_data['location']['latitude'],
-                    'Box_Width': order_data['dimension']['width'],
-                    'Box_Length': order_data['dimension']['length'],
-                    'Box_Height': order_data['dimension']['height']
+                    'Box_Width': order_data['dimension']['width'] / 100,  # cm를 m로 변환
+                    'Box_Length': order_data['dimension']['length'] / 100,  # cm를 m로 변환
+                    'Box_Height': order_data['dimension']['height'] / 100  # cm를 m로 변환
                 })
 
             route_order += 1
+            # 끝 Depot 추가
             result_data.append({
                 'Vehicle_ID': vehicle_id,
                 'Route_Order': route_order,
