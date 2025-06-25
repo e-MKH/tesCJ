@@ -26,6 +26,7 @@ class VehicleRoutingProblem:
     def load_distance_matrix(self, filename):
         df = pd.read_csv(filename, sep='\t')
 
+        # 주문에 있는 모든 목적지 수집
         used_destinations = set()
         for order in self.data['orders']:
             used_destinations.add(order['destination'])
@@ -36,9 +37,11 @@ class VehicleRoutingProblem:
         n = len(locations)
         matrix = [[999999] * n for _ in range(n)]
 
+        # 대각선은 0으로 설정
         for i in range(n):
             matrix[i][i] = 0
 
+        # 거리 데이터 채우기
         for _, row in df.iterrows():
             origin = row['ORIGIN']
             destination = row['DESTINATION']
@@ -49,6 +52,7 @@ class VehicleRoutingProblem:
                 j = location_to_idx[destination]
                 matrix[i][j] = int(distance)
 
+        # 대칭 매트릭스 처리
         for i in range(n):
             for j in range(n):
                 if matrix[i][j] == 999999 and matrix[j][i] != 999999:
