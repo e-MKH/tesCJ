@@ -4,8 +4,6 @@ from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass
 from collections import defaultdict
 import math
-import numpy as np
-from sklearn.cluster import KMeans
 
 # ========================= 데이터 구조 정의 =========================
 
@@ -95,7 +93,7 @@ class DataPreprocessor:
 
     def load_data(self, data_file: str, distance_file: str):
         """데이터 파일들을 로드하는 메인 함수"""
-        # print("데이터 로딩 시작...")
+        print("데이터 로딩 시작...")
 
         # JSON 데이터 로드
         self._load_json_data(data_file)
@@ -106,7 +104,7 @@ class DataPreprocessor:
         # 데이터 전처리
         self._preprocess_data()
 
-        # print(f"데이터 로딩 완료: {len(self.orders)}개 주문, {len(self.destinations)}개 목적지")
+        print(f"데이터 로딩 완료: {len(self.orders)}개 주문, {len(self.destinations)}개 목적지")
 
     def _load_json_data(self, data_file: str):
         """JSON 파일에서 데이터를 로드"""
@@ -166,17 +164,17 @@ class DataPreprocessor:
 
                 to_location = locations[j]
 
-                # 숫자가 아닌 값 처리 (헤더 중복 등)
+                # 숫자 변환
                 try:
                     distance = int(distance_str)
                     self.distance_matrix[(from_location, to_location)] = distance
                 except ValueError:
-                    # 숫자가 아닌 경우 건너뛰기 (헤더 중복이나 잘못된 데이터)
+                    # 숫자가 아닌 경우 건너뛰기
                     continue
 
     def _preprocess_data(self):
         """데이터 전처리 수행"""
-        # print("데이터 전처리 시작...")
+        print("데이터 전처리 시작...")
 
         # 1. 목적지별 주문 그룹화
         self._group_orders_by_destination()
@@ -184,17 +182,14 @@ class DataPreprocessor:
         # 2. 박스 크기별 분류 및 통계
         self._analyze_box_sizes()
 
-        # 3. 데이터 유효성 검증
-        self._validate_data()
-
-        # print("데이터 전처리 완료")
+        print("데이터 전처리 완료")
 
     def _group_orders_by_destination(self):
         """목적지별로 주문을 그룹화"""
         for order in self.orders:
             self.orders_by_destination[order.destination].append(order)
 
-        # print(f"목적지별 주문 그룹화 완료: {len(self.orders_by_destination)}개 목적지")
+        print(f"목적지별 주문 그룹화 완료: {len(self.orders_by_destination)}개 목적지")
 
     def _analyze_box_sizes(self):
         """박스 크기별 분석 및 통계"""
@@ -214,48 +209,22 @@ class DataPreprocessor:
 
             total_volume += order.volume
 
-        # print(f"박스 크기 분석:")
-        # print(f"  - 소형(30x40x30): {size_groups['small']}개")
-        # print(f"  - 중형(30x50x40): {size_groups['medium']}개")
-        # print(f"  - 대형(50x60x50): {size_groups['large']}개")
-        # print(f"  - 기타: {size_groups['custom']}개")
-        # print(f"  - 총 부피: {total_volume:,.0f} cm³")
+        print(f"박스 크기 분석:")
+        print(f"  - 소형(30x40x30): {size_groups['small']}개")
+        print(f"  - 중형(30x50x40): {size_groups['medium']}개")
+        print(f"  - 대형(50x60x50): {size_groups['large']}개")
+        print(f"  - 기타: {size_groups['custom']}개")
+        print(f"  - 총 부피: {total_volume:,.0f} cm³")
 
         # 예상 필요 차량 수 계산
         estimated_vehicles = math.ceil(total_volume / self.vehicle.max_volume)
-        # print(f"  - 예상 필요 차량 수: {estimated_vehicles}대")
-
-    def _validate_data(self):
-        """데이터 유효성 검증"""
-        errors = []
-
-        # 1. 모든 주문의 목적지가 destinations에 존재하는지 확인
-        for order in self.orders:
-            if order.destination not in self.destinations:
-                errors.append(f"주문 {order.order_number}: 존재하지 않는 목적지 {order.destination}")
-
-        # 2. 박스 크기가 차량 적재함보다 큰 경우 확인
-        for order in self.orders:
-            if (order.width > self.vehicle.max_width or
-                order.length > self.vehicle.max_length or
-                order.height > self.vehicle.max_height):
-                errors.append(f"주문 {order.order_number}: 박스가 차량 적재함보다 큼")
-
-        if errors:
-            # print("데이터 유효성 검증 오류:")
-            for error in errors[:10]:
-                pass
-            if len(errors) > 10:
-                pass
-        else:
-            # print("데이터 유효성 검증 통과")
-            pass
+        print(f"  - 예상 필요 차량 수: {estimated_vehicles}대")
 
     def get_distance(self, from_location: str, to_location: str) -> int:
         """두 위치 간의 거리를 반환"""
         distance = self.distance_matrix.get((from_location, to_location), None)
         if distance is None:
-            # 거리 정보가 없는 경우 큰 값으로 설정 (하지만 무한대는 아님)
+            # 거리 정보가 없는 경우 큰 값으로 설정
             return 999999
         return distance
 
@@ -270,20 +239,15 @@ class ClusteringManager:
         self.destination_to_cluster: Dict[str, int] = {}
         self.vehicle_capacity = preprocessor.vehicle.max_volume
 
-    def create_clusters(self, max_cluster_volume_ratio: float = 0.8, use_kmeans: bool = True):
-        """클러스터 생성 메인 함수 (K-means 기반 옵션 추가)"""
-        # print("클러스터링 시작...")
+    def create_clusters(self, max_cluster_volume_ratio: float = 0.8):
+        """클러스터 생성 메인 함수"""
+        print("클러스터링 시작...")
 
         # 1. 목적지별 주문 분석
         dest_info = self._analyze_destinations()
 
-        # 2. K-means 기반 클러스터링 (옵션)
-        if use_kmeans:
-            initial_clusters = self._kmeans_geographic_clustering(dest_info)
-        else:
-            # 기존 Greedy 방식 (주석 처리)
-            # initial_clusters = self._geographic_clustering(dest_info)
-            initial_clusters = self._geographic_clustering(dest_info)
+        # 2. 지리적 근접성 기반 초기 클러스터링
+        initial_clusters = self._geographic_clustering(dest_info)
 
         # 3. 부피 제약 조건 적용
         volume_adjusted_clusters = self._adjust_for_volume_constraints(
@@ -296,7 +260,7 @@ class ClusteringManager:
         # 5. 클러스터 정보 저장
         self._finalize_clusters(final_clusters)
 
-        # print(f"클러스터링 완료: {len(self.clusters)}개 클러스터 생성")
+        print(f"클러스터링 완료: {len(self.clusters)}개 클러스터 생성")
 
     def _analyze_destinations(self) -> Dict[str, Dict]:
         """목적지별 주문 정보 분석"""
@@ -340,7 +304,7 @@ class ClusteringManager:
 
     def _geographic_clustering(self, dest_info: Dict) -> List[List[str]]:
         """지리적 근접성 기반 클러스터링"""
-        # print("  지리적 클러스터링 수행...")
+        print("  지리적 클러스터링 수행...")
 
         unassigned = set(dest_info.keys())
         clusters = []
@@ -383,7 +347,7 @@ class ClusteringManager:
 
             clusters.append(cluster)
 
-        # print(f"    초기 클러스터 {len(clusters)}개 생성")
+        print(f"    초기 클러스터 {len(clusters)}개 생성")
         return clusters
 
     def _calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -393,7 +357,7 @@ class ClusteringManager:
     def _adjust_for_volume_constraints(self, clusters: List[List[str]],
                                      max_ratio: float) -> List[List[str]]:
         """부피 제약 조건에 따른 클러스터 조정"""
-        # print("  부피 제약 조건 적용...")
+        print("  부피 제약 조건 적용...")
 
         adjusted_clusters = []
         max_volume = self.vehicle_capacity * max_ratio
@@ -410,7 +374,7 @@ class ClusteringManager:
                 split_clusters = self._split_large_cluster(cluster_destinations, max_volume)
                 adjusted_clusters.extend(split_clusters)
 
-        # print(f"    부피 조정 후 클러스터 {len(adjusted_clusters)}개")
+        print(f"    부피 조정 후 클러스터 {len(adjusted_clusters)}개")
         return adjusted_clusters
 
     def _split_large_cluster(self, destinations: List[str], max_volume: float) -> List[List[str]]:
@@ -444,7 +408,7 @@ class ClusteringManager:
 
     def _optimize_box_distribution(self, clusters: List[List[str]]) -> List[List[str]]:
         """박스 크기 분포 최적화"""
-        # print("  박스 크기 분포 최적화...")
+        print("  박스 크기 분포 최적화...")
 
         cluster_scores = []
         for i, cluster_destinations in enumerate(clusters):
@@ -501,29 +465,6 @@ class ClusteringManager:
             for dest in destinations:
                 self.destination_to_cluster[dest] = i
 
-    def _kmeans_geographic_clustering(self, dest_info: dict, n_clusters: int = None) -> list:
-        """K-means 기반 목적지 클러스터링 (위경도 좌표 사용)"""
-        # print("  K-means 지리적 클러스터링 수행...")
-        dest_ids = list(dest_info.keys())
-        coords = np.array([
-            [dest_info[d]['location'].latitude, dest_info[d]['location'].longitude]
-            for d in dest_ids
-        ])
-        # 클러스터 수 자동 결정: 차량 수, 총 부피 등 고려
-        total_volume = sum(dest_info[d]['total_volume'] for d in dest_ids)
-        vehicle_capacity = self.vehicle_capacity if hasattr(self, 'vehicle_capacity') else 160*280*180
-        min_clusters = int(np.ceil(total_volume / (vehicle_capacity * 0.8)))
-        max_clusters = min(len(dest_ids), 12)
-        n_clusters = n_clusters or min_clusters
-        n_clusters = max(1, min(n_clusters, max_clusters))
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(coords)
-        clusters = [[] for _ in range(n_clusters)]
-        for idx, label in enumerate(labels):
-            clusters[label].append(dest_ids[idx])
-        # print(f"    K-means 초기 클러스터 {len(clusters)}개 생성")
-        return clusters
-
 # ========================= 라우팅 최적화 클래스 =========================
 
 class RoutingOptimizer:
@@ -536,7 +477,7 @@ class RoutingOptimizer:
 
     def optimize_routes(self):
         """모든 클러스터에 대해 라우팅 최적화 수행"""
-        # print("라우팅 최적화 시작...")
+        print("라우팅 최적화 시작...")
 
         self.routes = []
         for cluster in self.clustering_manager.clusters:
@@ -549,7 +490,7 @@ class RoutingOptimizer:
 
             self.routes.append(route)
 
-        # print(f"라우팅 최적화 완료: {len(self.routes)}개 경로 생성")
+        print(f"라우팅 최적화 완료: {len(self.routes)}개 경로 생성")
 
     def _create_simple_route(self, cluster: Cluster) -> Route:
         """단일 목적지 클러스터에 대한 간단한 경로 생성"""
@@ -704,20 +645,6 @@ class RoutingOptimizer:
 
         return total_distance
 
-    def print_routing_summary(self):
-        """라우팅 요약 정보 출력"""
-        # print("\n=== 라우팅 최적화 요약 ===")
-        total_cost = 0
-        total_distance = 0
-
-        for route in self.routes:
-            # print(f"클러스터 {route.cluster_id}:")
-            # print(f"  - 목적지 순서: {' -> '.join(route.destinations)}")
-            # print(f"  - 총 거리: {route.total_distance} km")
-            # print(f"  - 경로 비용: {route.route_cost:,}원")
-            total_cost += route.route_cost
-            total_distance += route.total_distance
-
 # ========================= 적재 최적화 클래스 =========================
 
 class PackingOptimizer:
@@ -730,12 +657,6 @@ class PackingOptimizer:
 
     def optimize_packing_for_route(self, route: Route) -> List[VehiclePlan]:
         """경로에 대한 적재 최적화 수행"""
-        cluster = None
-        for c in self.preprocessor.orders_by_destination:
-            if any(dest in route.destinations for dest in [c]):
-                cluster = c
-                break
-
         # 경로의 모든 주문 수집
         all_orders = []
         for dest in route.destinations:
@@ -747,7 +668,7 @@ class PackingOptimizer:
         return vehicle_plans
 
     def _create_vehicle_plans(self, route: Route, orders: List[Box]) -> List[VehiclePlan]:
-        """차량별 적재 계획 생성 (셔플링 최소화 + 높이 초과 방지)"""
+        """차량별 적재 계획 생성 (셔플링 최소화 고려)"""
         vehicle_plans = []
 
         # 목적지별 주문 그룹화
@@ -758,26 +679,34 @@ class PackingOptimizer:
         # 배송 순서에 따른 최적 적재 순서 결정 (LIFO + 셔플링 최소화)
         optimized_loading_order = self._optimize_loading_order(route.destinations, orders_by_dest)
 
-        remaining_orders = optimized_loading_order[:]
+        current_vehicle_boxes = []
+        current_volume = 0
         vehicle_id = 0
-        while remaining_orders:
-            # 가능한 최대한 많은 박스를 적재하되, 높이 초과가 발생하지 않는 범위까지
-            for i in range(len(remaining_orders), 0, -1):
-                candidate_boxes = remaining_orders[:i]
-                packed_boxes = self._pack_boxes_3d(candidate_boxes)
-                # 모든 박스가 차량 높이 이내에 적재되는지 체크
-                if all(pb.z + pb.box.height <= self.vehicle.max_height + 1e-6 for pb in packed_boxes):
-                    # 적재 성공
+
+        for order in optimized_loading_order:
+            # 현재 차량에 적재 가능한지 확인
+            if current_volume + order.volume <= self.vehicle.max_volume:
+                current_vehicle_boxes.append(order)
+                current_volume += order.volume
+            else:
+                # 현재 차량으로 적재 계획 생성
+                if current_vehicle_boxes:
                     plan = self._create_single_vehicle_plan(
-                        vehicle_id, route, candidate_boxes
+                        vehicle_id, route, current_vehicle_boxes
                     )
                     vehicle_plans.append(plan)
                     vehicle_id += 1
-                    remaining_orders = remaining_orders[i:]
-                    break
-            else:
-                # 한 박스도 적재 불가(너무 큼) → 오류 처리
-                raise Exception("박스가 차량에 적재 불가합니다. (높이 초과)")
+
+                # 새 차량 시작
+                current_vehicle_boxes = [order]
+                current_volume = order.volume
+
+        # 마지막 차량 처리
+        if current_vehicle_boxes:
+            plan = self._create_single_vehicle_plan(
+                vehicle_id, route, current_vehicle_boxes
+            )
+            vehicle_plans.append(plan)
 
         return vehicle_plans
 
@@ -845,9 +774,6 @@ class PackingOptimizer:
         packed_boxes = []
 
         # 박스를 안정성을 고려하여 정렬
-        # 1. 바닥 면적이 큰 것부터 (안정적인 기반)
-        # 2. 부피가 큰 것부터
-        # 3. 높이가 낮은 것부터 (안정적인 적재)
         sorted_boxes = sorted(boxes, key=lambda b: (
             -(b.width * b.length),  # 바닥 면적 큰 것부터
             -b.volume,              # 부피 큰 것부터
@@ -855,18 +781,12 @@ class PackingOptimizer:
             b.box_id                # 일관된 정렬을 위한 ID
         ))
 
-        # 이미 배치된 박스들의 위치 추적 (더 정확한 추적)
+        # 이미 배치된 박스들의 위치 추적
         occupied_spaces = []
 
         for i, box in enumerate(sorted_boxes):
             # 최적 위치 찾기
             position = self._find_best_position(box, occupied_spaces)
-
-            # 위치 유효성 재확인
-            if not self._validate_position(position, box, occupied_spaces):
-                # print(f"경고: 박스 {box.box_id}의 위치 ({position})가 유효하지 않습니다.")
-                # 강제로 빈 공간 찾기
-                position = self._find_safe_position(box, occupied_spaces)
 
             packed_box = PackedBox(
                 box=box,
@@ -877,7 +797,7 @@ class PackingOptimizer:
             )
             packed_boxes.append(packed_box)
 
-            # 점유 공간 정확히 추가
+            # 점유 공간 추가
             occupied_space = {
                 'x1': position[0],
                 'y1': position[1],
@@ -890,74 +810,15 @@ class PackingOptimizer:
             }
             occupied_spaces.append(occupied_space)
 
-            # 배치 후 겹침 재검증
-            if self._has_overlaps(occupied_spaces):
-                pass
-
         return packed_boxes
 
-    def _validate_position(self, position: Tuple[float, float, float], box: Box,
-                          occupied_spaces: List[Dict]) -> bool:
-        """위치 유효성 검증"""
-        x, y, z = position
-
-        # 차량 경계 확인
-        if (x + box.width > self.vehicle.max_width or
-            y + box.length > self.vehicle.max_length or
-            z + box.height > self.vehicle.max_height):
-            return False
-
-        # 겹침 확인
-        if self._check_overlap_strict(x, y, z, box, occupied_spaces):
-            return False
-
-        return True
-
-    def _find_safe_position(self, box: Box, occupied_spaces: List[Dict]) -> Tuple[float, float, float]:
-        """안전한 위치 강제 탐색 (최후의 수단) - cm 단위"""
-        max_width = self.vehicle.max_width   # 160cm
-        max_length = self.vehicle.max_length # 280cm
-        max_height = self.vehicle.max_height # 180cm
-
-        # 더 작은 단위로 전체 공간 스캔 (cm 단위)
-        step = 5  # 5cm 단위
-
-        for z in range(0, int(max_height - box.height + 1), step):
-            for y in range(0, int(max_length - box.length + 1), step):
-                for x in range(0, int(max_width - box.width + 1), step):
-                    if not self._check_overlap_strict(x, y, z, box, occupied_spaces):
-                        return (float(x), float(y), float(z))
-
-        # 정말 공간이 없다면 위쪽으로 쌓기
-        if occupied_spaces:
-            max_z = max(space['z2'] for space in occupied_spaces)
-            return (0.0, 0.0, float(max_z))
-
-        return (0.0, 0.0, 0.0)
-
-    def _has_overlaps(self, occupied_spaces: List[Dict]) -> bool:
-        """전체 배치에서 겹침이 있는지 확인"""
-        for i in range(len(occupied_spaces) - 1):
-            space1 = occupied_spaces[i]
-            space2 = occupied_spaces[i + 1]
-
-            x_overlap = space1['x1'] < space2['x2'] and space1['x2'] > space2['x1']
-            y_overlap = space1['y1'] < space2['y2'] and space1['y2'] > space2['y1']
-            z_overlap = space1['z1'] < space2['z2'] and space1['z2'] > space2['z1']
-
-            if x_overlap and y_overlap and z_overlap:
-                # print(f"겹침 발견: {space1['box_id']} ↔ {space2['box_id']}")
-                return True
-
-        return False
-
     def _find_best_position(self, box: Box, occupied_spaces: List[Dict]) -> Tuple[float, float, float]:
-        """박스에 대한 최적 위치 찾기 (cm 단위 유지)"""
-        max_width = self.vehicle.max_width   # 160cm
-        max_length = self.vehicle.max_length # 280cm
-        max_height = self.vehicle.max_height # 180cm
+        """박스에 대한 최적 위치 찾기"""
+        max_width = self.vehicle.max_width
+        max_length = self.vehicle.max_length
+        max_height = self.vehicle.max_height
 
-        # 격자 단위로 위치 후보 생성 (cm 단위로 탐색)
+        # 격자 단위로 위치 후보 생성
         step_size = 10  # 10cm 단위로 탐색
         candidates = []
 
@@ -971,7 +832,7 @@ class PackingOptimizer:
                         z + box.height <= max_height):
 
                         # 다른 박스와 겹치지 않는지 확인
-                        if not self._check_overlap_strict(x, y, z, box, occupied_spaces):
+                        if not self._check_overlap(x, y, z, box, occupied_spaces):
                             candidates.append((x, y, z))
 
         if not candidates:
@@ -979,14 +840,14 @@ class PackingOptimizer:
             candidates = self._find_corner_positions(box, occupied_spaces, max_width, max_length, max_height)
 
         if not candidates:
-            # print(f"경고: 박스 {box.box_id}에 대한 유효한 위치를 찾을 수 없습니다. 기본 위치 (0,0,0) 사용")
             return (0.0, 0.0, 0.0)
 
-        # 가장 아래쪽, 뒤쪽, 왼쪽 우선으로 정렬 (안정적인 적재)
+        # 가장 아래쪽, 뒤쪽, 왼쪽 우선으로 정렬
         candidates.sort(key=lambda pos: (pos[2], pos[1], pos[0]))
         return (float(candidates[0][0]), float(candidates[0][1]), float(candidates[0][2]))
 
-    def _find_corner_positions(self, box: Box, occupied_spaces: List[Dict], max_width: float, max_length: float, max_height: float) -> List[Tuple[float, float, float]]:
+    def _find_corner_positions(self, box: Box, occupied_spaces: List[Dict],
+                              max_width: float, max_length: float, max_height: float) -> List[Tuple[float, float, float]]:
         """기존 박스 모서리 기반 위치 후보 생성"""
         candidates = [(0, 0, 0)]  # 바닥 모서리
 
@@ -1009,69 +870,157 @@ class PackingOptimizer:
             if (x + box.width <= max_width and
                 y + box.length <= max_length and
                 z + box.height <= max_height):
-                if not self._check_overlap_strict(x, y, z, box, occupied_spaces):
+
+                if not self._check_overlap(x, y, z, box, occupied_spaces):
                     valid_candidates.append((x, y, z))
 
         return valid_candidates
 
-    def _check_overlap_strict(self, x: float, y: float, z: float, box: Box,
-                             occupied_spaces: List[Dict]) -> bool:
-        """엄격한 겹침 검사 (부동소수점 오차 고려)"""
+    def _check_overlap(self, x: float, y: float, z: float, box: Box,
+                      occupied_spaces: List[Dict]) -> bool:
+        """겹침 검사"""
         box_x2 = x + box.width
         box_y2 = y + box.length
         box_z2 = z + box.height
 
-        tolerance = 0.01  # 1cm 허용 오차
+        tolerance = 0.01  # 허용 오차
 
         for space in occupied_spaces:
             # 겹침 조건: 모든 축에서 겹치는 경우
-            x_overlap = (box_x2 > space['x1'] + tolerance and x < space['x2'] - tolerance)
-            y_overlap = (box_y2 > space['y1'] + tolerance and y < space['y2'] - tolerance)
-            z_overlap = (box_z2 > space['z1'] + tolerance and z < space['z2'] - tolerance)
+            x_overlap = (box_x2 > space['x1'] + tolerance and
+                        x < space['x2'] - tolerance)
+            y_overlap = (box_y2 > space['y1'] + tolerance and
+                        y < space['y2'] - tolerance)
+            z_overlap = (box_z2 > space['z1'] + tolerance and
+                        z < space['z2'] - tolerance)
+
             if x_overlap and y_overlap and z_overlap:
                 return True
+
         return False
 
     def _calculate_unloading_cost(self, packed_boxes: List[PackedBox],
                                  delivery_order: List[str]) -> int:
         """하차 비용 계산 (셔플링 횟수 기반)"""
         total_shuffling = 0
+
         # 배송 순서대로 하차 시뮬레이션
         remaining_boxes = packed_boxes[:]
+
         for dest in delivery_order:
             # 해당 목적지의 박스들 찾기
             dest_boxes = [pb for pb in remaining_boxes if pb.box.destination == dest]
+
             for target_box in dest_boxes:
                 # 이 박스를 출구로 꺼내기 위해 옮겨야 할 박스 수 계산
                 shuffling_count = self._calculate_shuffling_for_box(target_box, remaining_boxes)
                 total_shuffling += shuffling_count
                 remaining_boxes.remove(target_box)
+
         return total_shuffling * self.shuffling_cost
 
     def _calculate_shuffling_for_box(self, target_box: PackedBox, remaining_boxes: List[PackedBox]) -> int:
-        """특정 박스를 꺼내기 위한 셔플링 횟수 계산"""
+        """
+        특정 박스를 꺼내기 위한 셔플링 횟수 계산
+        조건: 위에 적재된 박스가 없고, 출구 방향으로 직선으로 꺼낼 수 있을 때까지
+        """
         shuffling_count = 0
+        boxes_to_move = []
 
-        # 출구는 Y=280cm (차량 뒤쪽)
-        truck_exit_y = self.vehicle.max_length  # 280cm
+        # 1단계: 위에 적재된 모든 박스들을 찾아서 제거
+        boxes_above = self._find_boxes_above(target_box, remaining_boxes)
+        for box_above in boxes_above:
+            if box_above not in boxes_to_move:
+                boxes_to_move.append(box_above)
+
+        # 2단계: 출구로의 직선 경로를 막는 모든 박스들을 찾아서 제거
+        # 위에 있던 박스들을 제거한 후의 상황에서 계산
+        current_remaining = [box for box in remaining_boxes if box not in boxes_to_move]
+        blocking_boxes = self._find_blocking_boxes_in_path(target_box, current_remaining)
+        for blocking_box in blocking_boxes:
+            if blocking_box not in boxes_to_move:
+                boxes_to_move.append(blocking_box)
+
+        # 3단계: 재귀적으로 이동해야 할 박스들 위의 박스들도 확인
+        # 셔플링 대상 박스들 위에 있는 박스들도 함께 이동해야 함
+        additional_boxes = []
+        for move_box in boxes_to_move:
+            boxes_above_move = self._find_boxes_above(move_box, remaining_boxes)
+            for additional_box in boxes_above_move:
+                if additional_box not in boxes_to_move and additional_box not in additional_boxes:
+                    additional_boxes.append(additional_box)
+
+        boxes_to_move.extend(additional_boxes)
+
+        return len(boxes_to_move)
+
+    def _find_boxes_above(self, target_box: PackedBox, remaining_boxes: List[PackedBox]) -> List[PackedBox]:
+        """target_box 위에 적재된 모든 박스들을 찾기 (직접 접촉하지 않아도 위에 있으면 포함)"""
+        boxes_above = []
 
         for other_box in remaining_boxes:
             if other_box == target_box:
                 continue
 
-            # 1. 위에 적재된 박스 체크 (Z축 방향)
-            if self._is_box_above(other_box, target_box):
-                shuffling_count += 1
+            # XY 평면에서 겹치는지 확인
+            x_overlap = (other_box.x < target_box.x + target_box.box.width and
+                        other_box.x + other_box.box.width > target_box.x)
+            y_overlap = (other_box.y < target_box.y + target_box.box.length and
+                        other_box.y + other_box.box.length > target_box.y)
+
+            # Z축에서 target_box보다 위에 있는지 확인 (직접 접촉하지 않아도 포함)
+            z_above = other_box.z >= target_box.z + target_box.box.height
+
+            if x_overlap and y_overlap and z_above:
+                boxes_above.append(other_box)
+
+        return boxes_above
+
+    def _find_blocking_boxes_in_path(self, target_box: PackedBox, remaining_boxes: List[PackedBox]) -> List[PackedBox]:
+        """target_box가 출구로 나가는 직선 경로를 막는 모든 박스들을 찾기"""
+        blocking_boxes = []
+
+        # 출구는 Y=280cm (차량 뒤쪽)
+        truck_exit_y = self.vehicle.max_length  # 280cm
+
+        # target_box의 출구 방향 경로 정의
+        # target_box가 Y축 방향으로 출구까지 이동하는 직선 경로
+        target_path = {
+            'x1': target_box.x,
+            'x2': target_box.x + target_box.box.width,
+            'y1': target_box.y + target_box.box.length,  # target_box 뒤쪽부터
+            'y2': truck_exit_y,  # 출구까지
+            'z1': target_box.z,
+            'z2': target_box.z + target_box.box.height
+        }
+
+        for other_box in remaining_boxes:
+            if other_box == target_box:
                 continue
 
-            # 2. 출구 방향으로 직선 경로를 가로막는 박스 체크 (Y축 방향)
-            if self._is_blocking_exit_path(other_box, target_box, truck_exit_y):
-                shuffling_count += 1
+            # other_box가 target_box의 출구 경로와 겹치는지 확인
+            if self._is_box_blocking_path(other_box, target_path):
+                blocking_boxes.append(other_box)
 
-        return shuffling_count
+        return blocking_boxes
 
+    def _is_box_blocking_path(self, box: PackedBox, path: Dict) -> bool:
+        """박스가 지정된 경로를 막고 있는지 확인"""
+        # 박스의 3D 영역
+        box_x1, box_x2 = box.x, box.x + box.box.width
+        box_y1, box_y2 = box.y, box.y + box.box.length
+        box_z1, box_z2 = box.z, box.z + box.box.height
+
+        # 경로와 박스가 겹치는지 확인 (모든 축에서 겹쳐야 blocking)
+        x_overlap = box_x1 < path['x2'] and box_x2 > path['x1']
+        y_overlap = box_y1 < path['y2'] and box_y2 > path['y1']
+        z_overlap = box_z1 < path['z2'] and box_z2 > path['z1']
+
+        return x_overlap and y_overlap and z_overlap
+
+    # 기존 메서드들은 하위 호환성을 위해 유지 (사용되지 않을 수 있음)
     def _is_box_above(self, blocker: PackedBox, target: PackedBox) -> bool:
-        """blocker가 target 위에 적재되어 있는지 확인"""
+        """blocker가 target 위에 적재되어 있는지 확인 (기존 메서드)"""
         # XY 평면에서 겹치고, blocker가 target보다 위에 있는 경우
         x_overlap = (blocker.x < target.x + target.box.width and
                     blocker.x + blocker.box.width > target.x)
@@ -1082,7 +1031,7 @@ class PackingOptimizer:
         return x_overlap and y_overlap and z_above
 
     def _is_blocking_exit_path(self, blocker: PackedBox, target: PackedBox, exit_y: float) -> bool:
-        """blocker가 target의 출구 방향 직선 경로를 막고 있는지 확인"""
+        """blocker가 target의 출구 방향 직선 경로를 막고 있는지 확인 (기존 메서드)"""
         # target이 출구로 나가는 직선 경로 (Y축 방향)
         target_exit_path_start_y = target.y + target.box.length
 
@@ -1133,7 +1082,7 @@ class IntegratedOptimizer:
 
     def optimize_integrated_solution(self):
         """라우팅과 적재를 통합하여 최적화"""
-        # print("통합 최적화 시작...")
+        print("통합 최적화 시작...")
 
         self.final_vehicle_plans = []
         global_vehicle_id = 0  # 전역 차량 ID 카운터
@@ -1149,11 +1098,11 @@ class IntegratedOptimizer:
 
             self.final_vehicle_plans.extend(vehicle_plans)
 
-        # print(f"통합 최적화 완료: {len(self.final_vehicle_plans)}대 차량 계획 생성")
+        print(f"통합 최적화 완료: {len(self.final_vehicle_plans)}대 차량 계획 생성")
 
     def generate_output_file(self, filename: str = "Result.xlsx"):
         """결과를 Excel 파일로 출력"""
-        # print(f"결과 파일 생성: {filename}")
+        print(f"결과 파일 생성: {filename}")
 
         # Excel 출력을 위한 데이터 준비
         output_data = []
@@ -1190,7 +1139,6 @@ class IntegratedOptimizer:
                     dest_location = self.preprocessor.destinations[box.destination]
 
                     # 프로젝트 요구사항에 맞는 컬럼 형식으로 데이터 생성
-                    # cm 단위 그대로 유지 (변환하지 않음)
                     row_data = {
                         'Vehicle_ID': plan.vehicle_id,
                         'Route_Order': route_order,
@@ -1198,18 +1146,18 @@ class IntegratedOptimizer:
                         'Order_Number': box.order_number,
                         'Box_ID': box.box_id,
                         'Stacking_Order': packed_box.stacking_order,
-                        'Lower_Left_X': round(packed_box.x, 2),  # cm 단위 유지
-                        'Lower_Left_Y': round(packed_box.y, 2),  # cm 단위 유지
-                        'Lower_Left_Z': round(packed_box.z, 2),  # cm 단위 유지
+                        'Lower_Left_X': round(packed_box.x, 2),
+                        'Lower_Left_Y': round(packed_box.y, 2),
+                        'Lower_Left_Z': round(packed_box.z, 2),
                         'Longitude': dest_location.longitude,
                         'Latitude': dest_location.latitude,
-                        'Box_Width': round(box.width, 2),   # cm 단위 유지
-                        'Box_Length': round(box.length, 2), # cm 단위 유지
-                        'Box_Height': round(box.height, 2)  # cm 단위 유지
+                        'Box_Width': round(box.width, 2),
+                        'Box_Length': round(box.length, 2),
+                        'Box_Height': round(box.height, 2)
                     }
                     output_data.append(row_data)
 
-            route_order += 1
+                route_order += 1
 
             # 차량 종료 - Depot 행 추가 (차량당 한 번만)
             depot_end_row = {
@@ -1251,9 +1199,9 @@ class IntegratedOptimizer:
             df = df[column_order]
 
             df.to_excel(filename, index=False)
-            # print(f"결과 파일 생성 완료: {filename}")
+            print(f"결과 파일 생성 완료: {filename}")
         except ImportError:
-            # print("pandas가 설치되어 있지 않습니다. CSV 파일로 출력합니다.")
+            print("pandas가 설치되어 있지 않습니다. CSV 파일로 출력합니다.")
             self._generate_csv_output(output_data, filename.replace('.xlsx', '.csv'))
 
     def _generate_csv_output(self, output_data: List[Dict], filename: str):
@@ -1277,25 +1225,32 @@ class IntegratedOptimizer:
             for row in output_data:
                 writer.writerow(row)
 
-        # print(f"CSV 파일 생성 완료: {filename}")
+        print(f"CSV 파일 생성 완료: {filename}")
 
     def print_final_summary(self):
         """최종 요약 정보 출력"""
-        # print("\n=== 최종 통합 최적화 결과 ===")
+        print("\n=== 최종 통합 최적화 결과 ===")
 
         total_routing_cost = sum(plan.routing_cost for plan in self.final_vehicle_plans)
         total_unloading_cost = sum(plan.unloading_cost for plan in self.final_vehicle_plans)
         total_cost = sum(plan.total_cost for plan in self.final_vehicle_plans)
 
-        # print(f"사용된 차량 수: {len(self.final_vehicle_plans)}대")
-        # print(f"총 라우팅 비용: {total_routing_cost:,}원")
-        # print(f"총 하차 비용: {total_unloading_cost:,}원")
+        print(f"사용된 차량 수: {len(self.final_vehicle_plans)}대")
+        print(f"총 라우팅 비용: {total_routing_cost:,}원")
+        print(f"총 하차 비용: {total_unloading_cost:,}원")
         print(f"총 비용: {total_cost:,}원")
 
         # 차량별 상세 정보
-        # print("\n=== 차량별 상세 정보 ===")
+        print("\n=== 차량별 상세 정보 ===")
         for plan in self.final_vehicle_plans:
-            pass
+            print(f"차량 {plan.vehicle_id}:")
+            print(f"  - 클러스터: {plan.cluster_id}")
+            print(f"  - 방문 목적지: {len(plan.route)}개")
+            print(f"  - 적재 박스: {len(plan.packed_boxes)}개")
+            print(f"  - 적재 부피: {plan.total_volume:,.0f} cm³ ({plan.total_volume/self.preprocessor.vehicle.max_volume*100:.1f}%)")
+            print(f"  - 라우팅 비용: {plan.routing_cost:,}원")
+            print(f"  - 하차 비용: {plan.unloading_cost:,}원")
+            print(f"  - 총 비용: {plan.total_cost:,}원")
 
 # ========================= 메인 시스템 클래스 =========================
 
@@ -1310,7 +1265,7 @@ class DeliveryOptimizationSystem:
 
     def run_optimization(self, data_file: str, distance_file: str):
         """전체 최적화 프로세스 실행"""
-        # print("=== 배송 최적화 시스템 시작 ===\n")
+        print("=== 배송 최적화 시스템 시작 ===\n")
 
         # 1. 데이터 입력 및 전처리
         self.preprocessor.load_data(data_file, distance_file)
@@ -1333,15 +1288,11 @@ class DeliveryOptimizationSystem:
         self.integrated_optimizer.generate_output_file("Result.xlsx")
         self.integrated_optimizer.print_final_summary()
 
-        # print("\n=== 배송 최적화 시스템 완료 ===")
+        print("\n=== 배송 최적화 시스템 완료 ===")
 
 # ========================= 실행 부분 =========================
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        # print("사용법: python main.py data.json distance-data.txt")
-        sys.exit(1)
-
     data_file = sys.argv[1]
     distance_file = sys.argv[2]
 
