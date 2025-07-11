@@ -644,7 +644,7 @@ class RoutingOptimizer:
 # ========================= 원본 기반 적재 최적화 클래스 =========================
 
 class PackingOptimizer:
-    """원본 기반 세밀 조정된 3D 빈 패킹"""
+    """개선된 3D 빈 패킹 - 겹침 방지 최적화"""
 
     def __init__(self, preprocessor: DataPreprocessor):
         self.preprocessor = preprocessor
@@ -661,7 +661,7 @@ class PackingOptimizer:
         return vehicle_plans
 
     def _create_vehicle_plans(self, route: Route, orders: List[Box]) -> List[VehiclePlan]:
-        """차량별 적재 계획 생성 (원본 기반, 소폭 개선)"""
+        """차량별 적재 계획 생성"""
         vehicle_plans = []
 
         orders_by_dest = defaultdict(list)
@@ -674,11 +674,10 @@ class PackingOptimizer:
         vehicle_id = 0
 
         while remaining_orders:
-            # 82% 활용률 목표로 더 많은 박스 적재 시도
             best_combination = []
             best_count = 0
 
-            # 더 적극적으로 박스 수를 늘려가며 시도
+            # 적재 가능한 최대한의 박스 조합 찾기
             for i in range(len(remaining_orders), 0, -1):
                 candidate_boxes = remaining_orders[:i]
 
@@ -688,7 +687,7 @@ class PackingOptimizer:
                     continue
 
                 try:
-                    packed_boxes = self._pack_boxes_3d_improved(candidate_boxes)
+                    packed_boxes = self._pack_boxes_3d_grid_based(candidate_boxes)
                     # 높이 제한 확인
                     if all(pb.z + pb.box.height <= self.vehicle.max_height + 1e-6 for pb in packed_boxes):
                         best_combination = candidate_boxes
@@ -710,7 +709,7 @@ class PackingOptimizer:
         return vehicle_plans
 
     def _optimize_loading_order(self, destinations: List[str], orders_by_dest: Dict[str, List[Box]]) -> List[Box]:
-        """원본 적재 순서 최적화 유지"""
+        """적재 순서 최적화 - LIFO를 고려한 역순 배치"""
         loading_order = []
         reversed_destinations = destinations[::-1]
 
@@ -719,6 +718,7 @@ class PackingOptimizer:
             if not dest_orders:
                 continue
 
+            # 큰 박스부터 먼저 적재 (안정성 확보)
             dest_orders_sorted = sorted(dest_orders, key=lambda box: (
                 -box.volume,
                 -box.height,
@@ -729,116 +729,134 @@ class PackingOptimizer:
 
         return loading_order
 
-    def _pack_boxes_3d_improved(self, boxes: List[Box]) -> List[PackedBox]:
-        """개선된 3D 빈 패킹 (겹침 방지 강화)"""
+    def _pack_boxes_3d_grid_based(self, boxes: List[Box]) -> List[PackedBox]:
+        """그리드 기반 3D 빈 패킹 - 겹침 완전 방지"""
         packed_boxes = []
 
-        sorted_boxes = sorted(boxes, key=lambda b: (
-            -(b.width * b.length),
-            -b.volume,
-            b.height,
-            b.box_id
-        ))
+        # 박스 크기별로 그룹화하여 더 효율적으로 배치
+        box_groups = self._group_boxes_by_size(boxes)
 
-        occupied_spaces = []
+        # 점유 공간을 그리드로 관리
+        occupied_grid = self._create_3d_grid()
 
-        for i, box in enumerate(sorted_boxes):
-            position = self._find_best_position_safe(box, occupied_spaces)
+        stacking_order = 0
 
-            packed_box = PackedBox(
-                box=box,
-                x=position[0],
-                y=position[1],
-                z=position[2],
-                stacking_order=i
-            )
-            packed_boxes.append(packed_box)
+        # 큰 박스부터 차례로 배치
+        for size_key in sorted(box_groups.keys(), key=lambda k: k[0]*k[1]*k[2], reverse=True):
+            for box in box_groups[size_key]:
+                position = self._find_optimal_grid_position(box, occupied_grid)
 
-            occupied_space = {
-                'x1': position[0],
-                'y1': position[1],
-                'z1': position[2],
-                'x2': position[0] + box.width,
-                'y2': position[1] + box.length,
-                'z2': position[2] + box.height,
-                'destination': box.destination,
-                'box_id': box.box_id
-            }
-            occupied_spaces.append(occupied_space)
+                if position is None:
+                    # 배치 불가능한 경우 에러 발생
+                    raise ValueError(f"박스 {box.box_id} 배치 불가능")
+
+                packed_box = PackedBox(
+                    box=box,
+                    x=position[0],
+                    y=position[1],
+                    z=position[2],
+                    stacking_order=stacking_order
+                )
+                packed_boxes.append(packed_box)
+                stacking_order += 1
+
+                # 그리드에 점유 표시
+                self._mark_occupied_grid(occupied_grid, position, box)
 
         return packed_boxes
 
-    def _find_best_position_safe(self, box: Box, occupied_spaces: List[Dict]) -> Tuple[float, float, float]:
-        """안전한 위치 찾기 (겹침 방지 강화)"""
-        max_width = self.vehicle.max_width
-        max_length = self.vehicle.max_length
-        max_height = self.vehicle.max_height
+    def _group_boxes_by_size(self, boxes: List[Box]) -> Dict[Tuple, List[Box]]:
+        """박스를 크기별로 그룹화"""
+        box_groups = defaultdict(list)
 
-        candidates = []
-        step_size = 5  # 더 세밀한 탐색
+        for box in boxes:
+            # 정규화된 크기로 그룹화 (회전 고려)
+            size_key = tuple(sorted([box.width, box.length, box.height], reverse=True))
+            box_groups[size_key].append(box)
 
-        # 바닥부터 차근차근 탐색
-        for z in range(0, int(max_height - box.height + 1), step_size):
-            for y in range(0, int(max_length - box.length + 1), step_size):
-                for x in range(0, int(max_width - box.width + 1), step_size):
-                    if (x + box.width <= max_width and
-                        y + box.length <= max_length and
-                        z + box.height <= max_height):
+        return box_groups
 
-                        if not self._check_overlap_strict_safe(x, y, z, box, occupied_spaces):
-                            candidates.append((x, y, z))
+    def _create_3d_grid(self, grid_size: int = 5) -> Dict[Tuple[int, int, int], bool]:
+        """3D 공간을 그리드로 분할하여 점유 상태 관리"""
+        grid = {}
 
-        if not candidates:
-            # 모서리 기반 탐색
-            candidates = self._find_corner_positions_safe(box, occupied_spaces, max_width, max_length, max_height)
+        max_x_grid = int(self.vehicle.max_width // grid_size) + 1
+        max_y_grid = int(self.vehicle.max_length // grid_size) + 1
+        max_z_grid = int(self.vehicle.max_height // grid_size) + 1
 
-        if not candidates:
-            return (0.0, 0.0, 0.0)
+        for x in range(max_x_grid):
+            for y in range(max_y_grid):
+                for z in range(max_z_grid):
+                    grid[(x, y, z)] = False
 
-        candidates.sort(key=lambda pos: (pos[2], pos[1], pos[0]))
-        return (float(candidates[0][0]), float(candidates[0][1]), float(candidates[0][2]))
+        return grid
 
-    def _find_corner_positions_safe(self, box: Box, occupied_spaces: List[Dict], max_width: float, max_length: float, max_height: float) -> List[Tuple[float, float, float]]:
-        """안전한 모서리 위치 탐색"""
-        candidates = [(0, 0, 0)]
+    def _find_optimal_grid_position(self, box: Box, occupied_grid: Dict) -> Tuple[float, float, float]:
+        """그리드 기반으로 최적 위치 탐색"""
+        grid_size = 5
 
-        for space in occupied_spaces:
-            edge_positions = [
-                (space['x2'], space['y1'], space['z1']),
-                (space['x1'], space['y2'], space['z1']),
-                (space['x1'], space['y1'], space['z2']),
-            ]
-            candidates.extend(edge_positions)
+        # 박스가 들어갈 수 있는 그리드 범위 계산
+        box_x_grids = int(math.ceil(box.width / grid_size))
+        box_y_grids = int(math.ceil(box.length / grid_size))
+        box_z_grids = int(math.ceil(box.height / grid_size))
 
-        valid_candidates = []
-        for x, y, z in candidates:
-            if (x + box.width <= max_width and
-                y + box.length <= max_length and
-                z + box.height <= max_height):
-                if not self._check_overlap_strict_safe(x, y, z, box, occupied_spaces):
-                    valid_candidates.append((x, y, z))
+        max_x_grid = int(self.vehicle.max_width // grid_size)
+        max_y_grid = int(self.vehicle.max_length // grid_size)
+        max_z_grid = int(self.vehicle.max_height // grid_size)
 
-        return valid_candidates
+        # 바닥부터 차례로 탐색 (Z축 우선)
+        for z_start in range(max_z_grid - box_z_grids + 1):
+            for y_start in range(max_y_grid - box_y_grids + 1):
+                for x_start in range(max_x_grid - box_x_grids + 1):
 
-    def _check_overlap_strict_safe(self, x: float, y: float, z: float, box: Box, occupied_spaces: List[Dict]) -> bool:
-        """강화된 겹침 검사 (더 큰 마진)"""
-        box_x2 = x + box.width
-        box_y2 = y + box.length
-        box_z2 = z + box.height
+                    # 해당 영역이 모두 비어있는지 확인
+                    if self._is_grid_area_free(occupied_grid, x_start, y_start, z_start,
+                                             box_x_grids, box_y_grids, box_z_grids):
 
-        tolerance = 0.1  # 더 큰 마진으로 겹침 방지
+                        # 실제 좌표로 변환하여 반환
+                        actual_x = x_start * grid_size
+                        actual_y = y_start * grid_size
+                        actual_z = z_start * grid_size
 
-        for space in occupied_spaces:
-            x_overlap = (box_x2 > space['x1'] + tolerance and x < space['x2'] - tolerance)
-            y_overlap = (box_y2 > space['y1'] + tolerance and y < space['y2'] - tolerance)
-            z_overlap = (box_z2 > space['z1'] + tolerance and z < space['z2'] - tolerance)
-            if x_overlap and y_overlap and z_overlap:
-                return True
-        return False
+                        # 차량 크기 제약 확인
+                        if (actual_x + box.width <= self.vehicle.max_width and
+                            actual_y + box.length <= self.vehicle.max_length and
+                            actual_z + box.height <= self.vehicle.max_height):
+
+                            return (float(actual_x), float(actual_y), float(actual_z))
+
+        return None
+
+    def _is_grid_area_free(self, occupied_grid: Dict, x_start: int, y_start: int, z_start: int,
+                          x_size: int, y_size: int, z_size: int) -> bool:
+        """그리드 영역이 비어있는지 확인"""
+        for x in range(x_start, x_start + x_size):
+            for y in range(y_start, y_start + y_size):
+                for z in range(z_start, z_start + z_size):
+                    if occupied_grid.get((x, y, z), False):
+                        return False
+        return True
+
+    def _mark_occupied_grid(self, occupied_grid: Dict, position: Tuple[float, float, float], box: Box):
+        """그리드에 박스 점유 영역 표시"""
+        grid_size = 5
+
+        x_start = int(position[0] // grid_size)
+        y_start = int(position[1] // grid_size)
+        z_start = int(position[2] // grid_size)
+
+        x_end = int(math.ceil((position[0] + box.width) / grid_size))
+        y_end = int(math.ceil((position[1] + box.length) / grid_size))
+        z_end = int(math.ceil((position[2] + box.height) / grid_size))
+
+        for x in range(x_start, x_end):
+            for y in range(y_start, y_end):
+                for z in range(z_start, z_end):
+                    occupied_grid[(x, y, z)] = True
 
     def _create_single_vehicle_plan(self, vehicle_id: int, route: Route, boxes: List[Box]) -> VehiclePlan:
         """단일 차량에 대한 적재 계획 생성"""
-        packed_boxes = self._pack_boxes_3d_improved(boxes)
+        packed_boxes = self._pack_boxes_3d_grid_based(boxes)
         unloading_cost = self._calculate_unloading_cost(packed_boxes, route.destinations)
 
         vehicle_destinations = []
