@@ -641,10 +641,10 @@ class RoutingOptimizer:
 
         return total_distance
 
-# ========================= 원본 기반 적재 최적화 클래스 =========================
+# ========================= 수정된 적재 최적화 클래스 =========================
 
 class PackingOptimizer:
-    """개선된 3D 빈 패킹 - 겹침 방지 최적화"""
+    """최종 효율성 개선된 3D 빈 패킹"""
 
     def __init__(self, preprocessor: DataPreprocessor):
         self.preprocessor = preprocessor
@@ -661,84 +661,137 @@ class PackingOptimizer:
         return vehicle_plans
 
     def _create_vehicle_plans(self, route: Route, orders: List[Box]) -> List[VehiclePlan]:
-        """차량별 적재 계획 생성"""
+        """차량별 적재 계획 생성 - 최대 효율성 추구"""
         vehicle_plans = []
 
         orders_by_dest = defaultdict(list)
         for order in orders:
             orders_by_dest[order.destination].append(order)
 
+        # LIFO 최적화된 적재 순서
         optimized_loading_order = self._optimize_loading_order(route.destinations, orders_by_dest)
 
         remaining_orders = optimized_loading_order[:]
         vehicle_id = 0
 
         while remaining_orders:
-            best_combination = []
-            best_count = 0
-
-            # 적재 가능한 최대한의 박스 조합 찾기
-            for i in range(len(remaining_orders), 0, -1):
-                candidate_boxes = remaining_orders[:i]
-
-                # 부피 제약 확인 (82% 이하)
-                total_volume = sum(box.volume for box in candidate_boxes)
-                if total_volume > self.vehicle.max_volume * 0.82:
-                    continue
-
-                try:
-                    packed_boxes = self._pack_boxes_3d_grid_based(candidate_boxes)
-                    # 높이 제한 확인
-                    if all(pb.z + pb.box.height <= self.vehicle.max_height + 1e-6 for pb in packed_boxes):
-                        best_combination = candidate_boxes
-                        best_count = i
-                        break
-                except:
-                    continue
+            # 🔧 최종 수정: 최대 효율성 추구
+            best_combination = self._select_maximum_efficiency_combination(
+                remaining_orders, route.destinations
+            )
 
             if not best_combination:
-                # 한 박스도 적재 불가능한 경우 최소 1개는 적재
+                # 최소 1개는 적재
                 best_combination = [remaining_orders[0]]
-                best_count = 1
 
             plan = self._create_single_vehicle_plan(vehicle_id, route, best_combination)
             vehicle_plans.append(plan)
             vehicle_id += 1
-            remaining_orders = remaining_orders[best_count:]
+
+            # 선택된 박스들 제거
+            for box in best_combination:
+                remaining_orders.remove(box)
 
         return vehicle_plans
 
-    def _optimize_loading_order(self, destinations: List[str], orders_by_dest: Dict[str, List[Box]]) -> List[Box]:
-        """적재 순서 최적화 - LIFO를 고려한 역순 배치"""
-        loading_order = []
-        reversed_destinations = destinations[::-1]
+    def _select_maximum_efficiency_combination(self, available_orders: List[Box], route_destinations: List[str]) -> List[Box]:
+        """최대 효율성 추구 박스 조합 선택 - 최종 수정"""
 
-        for dest in reversed_destinations:
-            dest_orders = orders_by_dest.get(dest, [])
-            if not dest_orders:
+        # 🔧 최종 수정 1: 매우 공격적인 부피 활용 (85%까지 허용)
+        max_volume = self.vehicle.max_volume * 0.85
+
+        best_combination = []
+        best_efficiency = -1
+
+        # 🔧 최종 수정 2: 더 넓은 범위에서 최적 조합 탐색
+        max_test_size = min(len(available_orders), 80)  # 50 → 80으로 증가
+
+        # 🔧 최종 수정 3: 최소 박스 수 확보 우선
+        min_boxes_for_efficiency = max(30, len(available_orders) // 4)  # 최소 30개 또는 전체의 1/4
+
+        # 큰 조합부터 테스트하되, 효율성 우선
+        for size in range(max_test_size, 0, -1):
+            candidate_boxes = available_orders[:size]
+
+            # 부피 제약 확인
+            total_volume = sum(box.volume for box in candidate_boxes)
+            if total_volume > max_volume:
                 continue
 
-            # 큰 박스부터 먼저 적재 (안정성 확보)
-            dest_orders_sorted = sorted(dest_orders, key=lambda box: (
-                -box.volume,
-                -box.height,
-                -box.width * box.length
-            ))
+            try:
+                # 3D 패킹 테스트
+                packed_boxes = self._pack_boxes_3d_grid_based(candidate_boxes)
 
-            loading_order.extend(dest_orders_sorted)
+                # 높이 제약 확인
+                if not all(pb.z + pb.box.height <= self.vehicle.max_height + 1e-6 for pb in packed_boxes):
+                    continue
 
-        return loading_order
+                # 🔧 최종 수정 4: 효율성 우선 점수 (활용률 90%, 셔플링 10%)
+                utilization = total_volume / self.vehicle.max_volume
+                shuffling_score = self._calculate_shuffling_score_simple(packed_boxes, route_destinations)
+
+                # 효율성 극대화 점수
+                efficiency_score = utilization * 0.9 - (shuffling_score / 200) * 0.1
+
+                # 🔧 최종 수정 5: 최소 박스 수 보너스
+                if size >= min_boxes_for_efficiency:
+                    efficiency_score += 0.1  # 보너스 점수
+
+                if efficiency_score > best_efficiency:
+                    best_efficiency = efficiency_score
+                    best_combination = candidate_boxes
+
+                # 🔧 최종 수정 6: 더 공격적인 조기 종료 (80% 이상)
+                if utilization >= 0.80:
+                    break
+
+            except:
+                continue
+
+        # 🔧 최종 수정 7: 최소 효율성 보장 (50% 미만이면 더 추가)
+        if best_combination:
+            total_volume = sum(box.volume for box in best_combination)
+            utilization = total_volume / self.vehicle.max_volume
+
+            if utilization < 0.50 and len(available_orders) > len(best_combination):
+                # 추가 박스로 50% 이상 확보 시도
+                additional_needed = int((0.50 * self.vehicle.max_volume - total_volume) / 60000)  # 평균 박스 부피
+                additional_boxes = available_orders[len(best_combination):len(best_combination) + additional_needed]
+
+                # 추가 박스와 함께 다시 테스트
+                extended_combination = best_combination + additional_boxes
+                extended_volume = sum(box.volume for box in extended_combination)
+
+                if extended_volume <= max_volume:
+                    try:
+                        packed_extended = self._pack_boxes_3d_grid_based(extended_combination)
+                        if all(pb.z + pb.box.height <= self.vehicle.max_height + 1e-6 for pb in packed_extended):
+                            best_combination = extended_combination
+                    except:
+                        pass  # 실패시 기존 조합 유지
+
+        return best_combination
+
+    def _calculate_shuffling_score_simple(self, packed_boxes: List[PackedBox], destinations: List[str]) -> float:
+        """간단한 셔플링 점수 계산"""
+        total_score = 0
+        remaining_boxes = packed_boxes[:]
+
+        for dest in destinations:
+            dest_boxes = [pb for pb in remaining_boxes if pb.box.destination == dest]
+
+            for target_box in dest_boxes:
+                shuffling_count = self._calculate_shuffling_for_box(target_box, remaining_boxes)
+                total_score += shuffling_count
+                remaining_boxes.remove(target_box)
+
+        return total_score
 
     def _pack_boxes_3d_grid_based(self, boxes: List[Box]) -> List[PackedBox]:
-        """그리드 기반 3D 빈 패킹 - 겹침 완전 방지"""
+        """효율성 중심 3D 빈 패킹"""
         packed_boxes = []
-
-        # 박스 크기별로 그룹화하여 더 효율적으로 배치
-        box_groups = self._group_boxes_by_size(boxes)
-
-        # 점유 공간을 그리드로 관리
+        box_groups = self._group_boxes_by_size_efficient(boxes)
         occupied_grid = self._create_3d_grid()
-
         stacking_order = 0
 
         # 큰 박스부터 차례로 배치
@@ -747,7 +800,6 @@ class PackingOptimizer:
                 position = self._find_optimal_grid_position(box, occupied_grid)
 
                 if position is None:
-                    # 배치 불가능한 경우 에러 발생
                     raise ValueError(f"박스 {box.box_id} 배치 불가능")
 
                 packed_box = PackedBox(
@@ -759,27 +811,38 @@ class PackingOptimizer:
                 )
                 packed_boxes.append(packed_box)
                 stacking_order += 1
-
-                # 그리드에 점유 표시
                 self._mark_occupied_grid(occupied_grid, position, box)
 
         return packed_boxes
 
-    def _group_boxes_by_size(self, boxes: List[Box]) -> Dict[Tuple, List[Box]]:
-        """박스를 크기별로 그룹화"""
+    def _group_boxes_by_size_efficient(self, boxes: List[Box]) -> Dict[Tuple, List[Box]]:
+        """효율성 중심의 박스 크기별 그룹화"""
         box_groups = defaultdict(list)
-
         for box in boxes:
-            # 정규화된 크기로 그룹화 (회전 고려)
             size_key = tuple(sorted([box.width, box.length, box.height], reverse=True))
             box_groups[size_key].append(box)
-
         return box_groups
+
+    def _optimize_loading_order(self, destinations: List[str], orders_by_dest: Dict[str, List[Box]]) -> List[Box]:
+        """LIFO 최적화된 적재 순서"""
+        loading_order = []
+        reversed_destinations = destinations[::-1]
+
+        for dest in reversed_destinations:
+            dest_orders = orders_by_dest.get(dest, [])
+            if not dest_orders:
+                continue
+
+            dest_orders_sorted = sorted(dest_orders, key=lambda box: (
+                -box.volume, -box.height, -box.width * box.length
+            ))
+            loading_order.extend(dest_orders_sorted)
+
+        return loading_order
 
     def _create_3d_grid(self, grid_size: int = 5) -> Dict[Tuple[int, int, int], bool]:
         """3D 공간을 그리드로 분할하여 점유 상태 관리"""
         grid = {}
-
         max_x_grid = int(self.vehicle.max_width // grid_size) + 1
         max_y_grid = int(self.vehicle.max_length // grid_size) + 1
         max_z_grid = int(self.vehicle.max_height // grid_size) + 1
@@ -788,14 +851,11 @@ class PackingOptimizer:
             for y in range(max_y_grid):
                 for z in range(max_z_grid):
                     grid[(x, y, z)] = False
-
         return grid
 
     def _find_optimal_grid_position(self, box: Box, occupied_grid: Dict) -> Tuple[float, float, float]:
         """그리드 기반으로 최적 위치 탐색"""
         grid_size = 5
-
-        # 박스가 들어갈 수 있는 그리드 범위 계산
         box_x_grids = int(math.ceil(box.width / grid_size))
         box_y_grids = int(math.ceil(box.length / grid_size))
         box_z_grids = int(math.ceil(box.height / grid_size))
@@ -804,27 +864,19 @@ class PackingOptimizer:
         max_y_grid = int(self.vehicle.max_length // grid_size)
         max_z_grid = int(self.vehicle.max_height // grid_size)
 
-        # 바닥부터 차례로 탐색 (Z축 우선)
         for z_start in range(max_z_grid - box_z_grids + 1):
             for y_start in range(max_y_grid - box_y_grids + 1):
                 for x_start in range(max_x_grid - box_x_grids + 1):
-
-                    # 해당 영역이 모두 비어있는지 확인
                     if self._is_grid_area_free(occupied_grid, x_start, y_start, z_start,
                                              box_x_grids, box_y_grids, box_z_grids):
-
-                        # 실제 좌표로 변환하여 반환
                         actual_x = x_start * grid_size
                         actual_y = y_start * grid_size
                         actual_z = z_start * grid_size
 
-                        # 차량 크기 제약 확인
                         if (actual_x + box.width <= self.vehicle.max_width and
                             actual_y + box.length <= self.vehicle.max_length and
                             actual_z + box.height <= self.vehicle.max_height):
-
                             return (float(actual_x), float(actual_y), float(actual_z))
-
         return None
 
     def _is_grid_area_free(self, occupied_grid: Dict, x_start: int, y_start: int, z_start: int,
@@ -840,7 +892,6 @@ class PackingOptimizer:
     def _mark_occupied_grid(self, occupied_grid: Dict, position: Tuple[float, float, float], box: Box):
         """그리드에 박스 점유 영역 표시"""
         grid_size = 5
-
         x_start = int(position[0] // grid_size)
         y_start = int(position[1] // grid_size)
         z_start = int(position[2] // grid_size)
@@ -888,7 +939,6 @@ class PackingOptimizer:
 
         for dest in delivery_order:
             dest_boxes = [pb for pb in remaining_boxes if pb.box.destination == dest]
-
             for target_box in dest_boxes:
                 shuffling_count = self._calculate_shuffling_for_box(target_box, remaining_boxes)
                 total_shuffling += shuffling_count
@@ -942,7 +992,6 @@ class PackingOptimizer:
         """차량별 라우팅 비용 계산"""
         if total_boxes == 0:
             return 0
-
         if total_route_cost >= 999999:
             return 999999
 
@@ -951,7 +1000,6 @@ class PackingOptimizer:
 
         if cost >= 999999:
             return 999999
-
         return int(cost)
 
 # ========================= 통합 최적화 및 결과 출력 클래스 =========================
