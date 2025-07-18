@@ -1,579 +1,213 @@
 import json
-import sys
-from typing import Dict, List, Tuple, Any
-from dataclasses import dataclass
-from collections import defaultdict
-import math
-import numpy as np
+import pandas as pd
 import time
-import random
+from collections import defaultdict
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+import sys
+
+# [1] 상수 정의
+MAX_CAPACITY = 160 * 280 * 180
+SHUFFLE_COST_PER_BOX = 500
+FUEL_COST_PER_KM = 500
+FIXED_COST_PER_VEHICLE = 150000
+
+# [2] 데이터 로딩 및 전처리 함수들
+def calculate_order_volume(order):
+    d = order["dimension"]
+    return d["width"] * d["length"] * d["height"]
+
+def load_json(filename):
+    with open(filename, 'r', encoding='utf-8-sig') as f:
+        return json.load(f)
+
+def load_distance_data(filepath):
+    distance_map = {}
+    locations = set()
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
+        next(f)
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) < 4:
+                continue
+            origin, dest, _, dist = parts
+            distance_map[(origin, dest)] = int(dist)
+            locations.update([origin, dest])
+    sorted_locations = sorted(list(locations))
+    index_map = {loc: i for i, loc in enumerate(sorted_locations)}
+    matrix = [[0]*len(sorted_locations) for _ in sorted_locations]
+    for (o, d), v in distance_map.items():
+        i, j = index_map[o], index_map[d]
+        matrix[i][j] = v
+        matrix[j][i] = v
+    return matrix, sorted_locations, index_map
+
+def get_coords_map(data):
+    coords = {d["destination_id"]: d["location"] for d in data["destinations"]}
+    coords["Depot"] = data["depot"]["location"]
+    return coords
+
+# [3] 적재 알고리즘 (경계 체크 포함)
+def is_overlap(b1, b2):
+    return (max(b1["X"], b2["X"]) < min(b1["X"] + b1["Width"], b2["X"] + b2["Width"]) and
+            max(b1["Y"], b2["Y"]) < min(b1["Y"] + b1["Length"], b2["Y"] + b2["Length"]) and
+            max(b1["Z"], b2["Z"]) < min(b1["Z"] + b1["Height"], b2["Z"] + b2["Height"]))
+
+def is_within_bounds(box):
+    return (box["X"] + box["Width"] <= 160 and
+            box["Y"] + box["Length"] <= 280 and
+            box["Z"] + box["Height"] <= 180)
+
+def find_position_fill_priority(placed, dim):
+    candidates = []
+    for z in range(0, 180 - dim["height"] + 1, 10):
+        for y in range(0, 280 - dim["length"] + 1, 10):
+            for x in range(0, 160 - dim["width"] + 1, 10):
+                new_box = {"X": x, "Y": y, "Z": z, "Width": dim["width"], "Length": dim["length"], "Height": dim["height"]}
+                if is_within_bounds(new_box) and all(not is_overlap(new_box, p) for p in placed):
+                    candidates.append(((z, y, x), new_box))
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1] if candidates else None
+
+# [4] 엑셀 저장 형식 변환 함수
+def save_result_excel(df):
+    column_mapping = {
+        "Vehicle_ID": "Vehicle_ID",
+        "Route_Order": "Route_Order",
+        "Destination": "Destination",
+        "Order_Number": "Order_Number",
+        "Box_ID": "Box_ID",
+        "Stacking_Order": "Stacking_Order",
+        "X": "Lower_Left_X",
+        "Y": "Lower_Left_Y",
+        "Z": "Lower_Left_Z",
+        "Longitude": "Longitude",
+        "Latitude": "Latitude",
+        "Width": "Box_Width",
+        "Length": "Box_Length",
+        "Height": "Box_Height"
+    }
+    column_order = [
+        "Vehicle_ID", "Route_Order", "Destination", "Order_Number", "Box_ID", "Stacking_Order",
+        "Lower_Left_X", "Lower_Left_Y", "Lower_Left_Z",
+        "Longitude", "Latitude", "Box_Width", "Box_Length", "Box_Height"
+    ]
+    df = df.rename(columns=column_mapping)
+    df = df[column_order]
+    df.to_excel("Result.xlsx", index=False)
+
+# [5] 라우팅 최적화 함수
+def get_vrp_route(dist_matrix, idx_map, locations, depot_id, destination_ids):
+    manager = pywrapcp.RoutingIndexManager(len(locations), 1, idx_map[depot_id])
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_idx, to_idx):
+        return dist_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
 
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
-from py3dbp import Packer, Bin, Item
+    transit_callback = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
 
-class VehicleRoutingProblem:
-    def __init__(self, data_file, distance_file):
-        self.data = self.load_data(data_file)
-        self.distance_matrix = self.load_distance_matrix(distance_file)
-        self.depot_idx = 0
-        self.vehicle_capacity = 160 * 280 * 180  # 8,064,000cm³
-        self.max_vehicles = 12  # 트럭 수 제한 완화
-        self.fixed_cost = 150_000
-        self.fuel_cost_per_km = 500
-        self.shuffling_cost = 500
+    search_params = pywrapcp.DefaultRoutingSearchParameters()
+    search_params.time_limit.seconds = 2
+    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
 
-    def load_data(self, filename):
-        with open(filename, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data
-
-    def load_distance_matrix(self, filename):
-        df = pd.read_csv(filename, sep='\t')
-
-        # 주문에 있는 모든 목적지 수집
-        used_destinations = set()
-        for order in self.data['orders']:
-            used_destinations.add(order['destination'])
-
-        locations = ['Depot'] + sorted(list(used_destinations))
-        location_to_idx = {loc: idx for idx, loc in enumerate(locations)}
-
-        n = len(locations)
-        matrix = [[999999] * n for _ in range(n)]
-
-        # 대각선은 0으로 설정
-        for i in range(n):
-            matrix[i][i] = 0
-
-        # 거리 데이터 채우기
-        for _, row in df.iterrows():
-            origin = row['ORIGIN']
-            destination = row['DESTINATION']
-            distance = row['DISTANCE_METER']
-
-            if origin in location_to_idx and destination in location_to_idx:
-                i = location_to_idx[origin]
-                j = location_to_idx[destination]
-                matrix[i][j] = int(distance)
-
-        # 대칭 매트릭스 처리
-        for i in range(n):
-            for j in range(n):
-                if matrix[i][j] == 999999 and matrix[j][i] != 999999:
-                    matrix[i][j] = matrix[j][i]
-                elif matrix[j][i] == 999999 and matrix[i][j] != 999999:
-                    matrix[j][i] = matrix[i][j]
-
-        return matrix, locations
-
-    def create_data_model(self):
-        distance_matrix, locations = self.distance_matrix
-
-        destination_orders = defaultdict(list)
-        total_volume = 0
-
-        for order in self.data['orders']:
-            dest_id = order['destination']
-            volume = order['dimension']['width'] * order['dimension']['length'] * order['dimension']['height']
-            total_volume += volume
-
-            destination_orders[dest_id].append({
-                'order_number': order['order_number'],
-                'box_id': order['box_id'],
-                'volume': volume,
-                'dimension': order['dimension']
-            })
-
-        min_vehicles_by_volume = math.ceil(total_volume / self.vehicle_capacity)
-        min_vehicles_by_destinations = math.ceil(len(destination_orders) / 25)
-        optimal_vehicles = max(min_vehicles_by_volume, min_vehicles_by_destinations, 1)
-        optimal_vehicles = min(optimal_vehicles, self.max_vehicles)
-
-        demands = [0]
-        order_info = [{}]
-
-        for location in locations[1:]:
-            total_volume = sum(order['volume'] for order in destination_orders[location])
-            demands.append(total_volume)
-            order_info.append(destination_orders[location])
-
-        return {
-            'distance_matrix': distance_matrix,
-            'demands': demands,
-            'vehicle_capacities': [self.vehicle_capacity] * optimal_vehicles,
-            'num_vehicles': optimal_vehicles,
-            'depot': 0,
-            'locations': locations,
-            'order_info': order_info
-        }
-
-    def solve_vrp(self, data):
-        manager = pywrapcp.RoutingIndexManager(
-            len(data['distance_matrix']),
-            data['num_vehicles'],
-            data['depot']
-        )
-
-        routing = pywrapcp.RoutingModel(manager)
-
-        def distance_callback(from_index, to_index):
-            from_node = manager.IndexToNode(from_index)
-            to_node = manager.IndexToNode(to_index)
-            return data['distance_matrix'][from_node][to_node]
-
-        transit_callback_index = routing.RegisterTransitCallback(distance_callback)
-        routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-
-        def demand_callback(from_index):
-            from_node = manager.IndexToNode(from_index)
-            return data['demands'][from_node]
-
-        demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
-        routing.AddDimensionWithVehicleCapacity(
-            demand_callback_index,
-            0,
-            data['vehicle_capacities'],
-            True,
-            'Capacity'
-        )
-
-        search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-        search_parameters.first_solution_strategy = (
-            routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-        )
-        search_parameters.local_search_metaheuristic = (
-            routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-        )
-        search_parameters.time_limit.FromSeconds(300)
-
-        solution = routing.SolveWithParameters(search_parameters)
-
-        if not solution:
-            search_parameters.time_limit.FromSeconds(60)
-            search_parameters.first_solution_strategy = (
-                routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
-            )
-            solution = routing.SolveWithParameters(search_parameters)
-
-        return manager, routing, solution
-
-    def extract_routes(self, manager, routing, solution, data):
-        routes = []
-        total_distance = 0
-
-        for vehicle_id in range(data['num_vehicles']):
-            index = routing.Start(vehicle_id)
-            route = []
-            route_distance = 0
-
-            while not routing.IsEnd(index):
-                node = manager.IndexToNode(index)
-                route.append(node)
-                previous_index = index
-                index = solution.Value(routing.NextVar(index))
-                route_distance += routing.GetArcCostForVehicle(previous_index, index, vehicle_id)
-
-            route.append(manager.IndexToNode(index))
-
-            if len(route) > 2:
-                routes.append({
-                    'vehicle_id': vehicle_id,
-                    'route': route,
-                    'distance': route_distance,
-                    'orders': []
-                })
-                total_distance += route_distance
-
-        return routes, total_distance
-
-    def find_best_position_extreme(self, box_dim, truck_dims, occupied_spaces, step=2):
-        # Extreme Point 방식: 후보 위치 리스트 + 박스 회전 허용
-        candidates = []
-        if not occupied_spaces:
-            candidates = [(0, 0, 0)]
-        else:
-            for space in occupied_spaces:
-                candidates.append((space['x'] + space['width'], space['y'], space['z']))
-                candidates.append((space['x'], space['y'] + space['length'], space['z']))
-                candidates.append((space['x'], space['y'], space['z'] + space['height']))
-        best_position = None
-        min_z = float('inf')
-        # 박스 회전 허용: (width, length)와 (length, width) 모두 시도
-        for dims in [box_dim, {'width': box_dim['length'], 'length': box_dim['width'], 'height': box_dim['height']}]:
-            for point in candidates:
-                x, y, z = point
-                # step 간격으로 x, y를 더 세밀하게 이동
-                for dx in range(0, 1, step):
-                    for dy in range(0, 1, step):
-                        xx, yy = x + dx, y + dy
-                        if (xx + dims['width'] > truck_dims['width'] or
-                            yy + dims['length'] > truck_dims['length'] or
-                            z + dims['height'] > truck_dims['height']):
-                            continue
-                        overlap = False
-                        for space in occupied_spaces:
-                            if not (
-                                xx + dims['width'] <= space['x'] or
-                                space['x'] + space['width'] <= xx or
-                                yy + dims['length'] <= space['y'] or
-                                space['y'] + space['length'] <= yy or
-                                z + dims['height'] <= space['z'] or
-                                space['z'] + space['height'] <= z
-                            ):
-                                overlap = True
-                                break
-                        if overlap:
-                            continue
-                        if z < min_z:
-                            min_z = z
-                            best_position = (xx, yy, z, dims['width'], dims['length'], dims['height'])
-        return best_position if best_position is not None else None
-
-    def find_best_position_layer(self, box_dim, truck_dims, occupied_spaces, layer_height=0):
-        # 현재 layer_height(층의 바닥) 위에 박스를 놓을 수 있는 위치를 찾음
-        step = 5
-        best_position = None
-        min_x, min_y = None, None
-        for x in range(0, truck_dims['width'] - box_dim['width'] + 1, step):
-            for y in range(0, truck_dims['length'] - box_dim['length'] + 1, step):
-                z = layer_height
-                # 겹침 검사
-                overlap = False
-                for space in occupied_spaces:
-                    if not (
-                        x + box_dim['width'] <= space['x'] or
-                        space['x'] + space['width'] <= x or
-                        y + box_dim['length'] <= space['y'] or
-                        space['y'] + space['length'] <= y or
-                        z + box_dim['height'] <= space['z'] or
-                        space['z'] + space['height'] <= z
-                    ):
-                        overlap = True
-                        break
-                if not overlap:
-                    best_position = (x, y, z)
-                    return best_position  # 가장 먼저 찾은 위치에 배치
-        return None  # 이 층에 더 이상 못 놓음
-
-    def try_multiple_packing_strategies(self, delivery_sequence, truck_dims):
-        # 여러 packing 순서(큰 박스 우선, 작은 박스 우선, 랜덤)를 시도해 최적 결과 선택
-        strategies = [
-            lambda seq: sorted(seq, key=lambda d: d['order']['dimension']['width'] * d['order']['dimension']['length'] * d['order']['dimension']['height'], reverse=True),  # 큰 박스 우선
-            lambda seq: sorted(seq, key=lambda d: d['order']['dimension']['width'] * d['order']['dimension']['length'] * d['order']['dimension']['height']),  # 작은 박스 우선
-            lambda seq: random.sample(seq, len(seq)),  # 랜덤
-        ]
-        best_orders = []
-        best_occupied = []
-        best_total_shuffling = 0
-        for strat in strategies:
-            seq = strat(delivery_sequence[:])
-            occupied_spaces = []
-            orders = []
-            total_shuffling = 0
-            stacking_order = 1
-            for delivery_info in seq:
-                order = delivery_info['order']
-                box_dim = order['dimension']
-                pos = self.find_best_position_extreme(box_dim, {'width': 160, 'length': 280, 'height': 180}, occupied_spaces, step=2)
-                if pos is None:
-                    continue
-                x, y, z, w, l, h = pos
-                occupied_spaces.append({
-                    'x': x, 'y': y, 'z': z,
-                    'width': w,
-                    'length': l,
-                    'height': h,
-                    'delivery_order': delivery_info['delivery_order']
-                })
-                shuffling_count = self.calculate_shuffling(
-                    (x, y, z), {'width': w, 'length': l, 'height': h}, delivery_info['delivery_order'], occupied_spaces[:-1]
-                )
-                total_shuffling += shuffling_count
-                orders.append({
-                    'order_number': order['order_number'],
-                    'box_id': order['box_id'],
-                    'destination': delivery_info['location'],
-                    'stacking_order': stacking_order,
-                    'position': {'x': x, 'y': y, 'z': z},
-                    'box_rotation': {'width': w, 'length': l, 'height': h},
-                    'shuffling_count': shuffling_count,
-                    'delivery_order': delivery_info['delivery_order']
-                })
-                stacking_order += 1
-            if len(orders) > len(best_orders):
-                best_orders = orders
-                best_occupied = occupied_spaces
-                best_total_shuffling = total_shuffling
-        return best_orders, best_occupied, best_total_shuffling
-
-    def calculate_shuffling_for_packed_orders(self, packed_orders):
-        shuffling_total = 0
-        for i, box in enumerate(packed_orders):
-            x, y, z = box['position']['x'], box['position']['y'], box['position']['z']
-            w, l, h = box['box_rotation']['width'], box['box_rotation']['length'], box['box_rotation']['height']
-            current_box = {'x': x, 'y': y, 'z': z, 'width': w, 'length': l, 'height': h}
-            shuffling = 0
-            for j, other in enumerate(packed_orders):
-                if i == j:
-                    continue
-                ox, oy, oz = other['position']['x'], other['position']['y'], other['position']['z']
-                ow, ol, oh = other['box_rotation']['width'], other['box_rotation']['length'], other['box_rotation']['height']
-                # 위에 쌓인 박스가 있는지
-                if (oz > z and
-                    not (x + w <= ox or ox + ow <= x or y + l <= oy or oy + ol <= y)):
-                    shuffling += 1
-            box['shuffling_count'] = shuffling
-            shuffling_total += shuffling
-        return shuffling_total
-
-    def perform_3d_packing(self, routes, data):
-        truck_dims = {'width': 160, 'length': 280, 'height': 180}
-        all_boxes = []
-        order_map = {}
-        for i, location in enumerate(data['locations'][1:], 1):
-            orders = data['order_info'][i]
-            for order in orders:
-                all_boxes.append({
-                    'order_number': order['order_number'],
-                    'box_id': order['box_id'],
-                    'destination': location,
-                    'dimension': order['dimension'],
-                    'delivery_order': i
-                })
-                order_map[order['order_number']] = {
-                    'box_id': order['box_id'],
-                    'destination': location,
-                    'dimension': order['dimension'],
-                    'delivery_order': i
-                }
-        remaining = all_boxes[:]
-        truck_id = 0
-        packed_trucks = []
-        while remaining and truck_id < self.max_vehicles:
-            packer = Packer()
-            bin = Bin(f'truck_{truck_id}', truck_dims['width'], truck_dims['length'], truck_dims['height'], 999999)
-            packer.add_bin(bin)
-            for box in remaining:
-                packer.add_item(Item(
-                    box['order_number'],
-                    box['dimension']['width'],
-                    box['dimension']['length'],
-                    box['dimension']['height'],
-                    1
-                ))
-            packer.pack(bigger_first=True, distribute_items=False)
-            packed_orders = []
-            for item in bin.items:
-                order_info = order_map.get(item.name, {})
-                packed_orders.append({
-                    'order_number': item.name,
-                    'box_id': order_info.get('box_id', ''),
-                    'destination': order_info.get('destination', ''),
-                    'stacking_order': 0,
-                    'position': {'x': item.position[0], 'y': item.position[1], 'z': item.position[2]},
-                    'box_rotation': {'width': item.width, 'length': item.depth, 'height': item.height},
-                    'shuffling_count': 0,
-                    'delivery_order': order_info.get('delivery_order', 0)
-                })
-            # 현실적인 셔플링(하차) 횟수 계산
-            total_shuffling = self.calculate_shuffling_for_packed_orders(packed_orders)
-            packed_trucks.append({'orders': packed_orders, 'total_shuffling': total_shuffling, 'vehicle_id': truck_id, 'route': [], 'distance': 0})
-            packed_order_numbers = set(item.name for item in bin.items)
-            remaining = [box for box in remaining if box['order_number'] not in packed_order_numbers]
-            truck_id += 1
-        for i, route_info in enumerate(routes):
-            if i < len(packed_trucks):
-                route_info['orders'] = packed_trucks[i]['orders']
-                route_info['total_shuffling'] = packed_trucks[i]['total_shuffling']
-            else:
-                route_info['orders'] = []
-                route_info['total_shuffling'] = 0
-        return routes
-
-    def find_best_position(self, box_dim, truck_dims, occupied_spaces, step=20):
-        best_position = None
-        min_height = float('inf')
-
-        for x in range(0, truck_dims['width'] - box_dim['width'] + 1, step):
-            for y in range(0, truck_dims['length'] - box_dim['length'] + 1, step):
-                z = self.find_lowest_z(x, y, box_dim, occupied_spaces)
-
-                if z + box_dim['height'] <= truck_dims['height']:
-                    if z < min_height:
-                        min_height = z
-                        best_position = (x, y, z)
-
-        return best_position
-
-    def find_lowest_z(self, x, y, box_dim, occupied_spaces):
-        z = 0
-
-        for space in occupied_spaces:
-            if self.boxes_overlap_xy(
-                {'x': x, 'y': y, 'width': box_dim['width'], 'length': box_dim['length']},
-                space
-            ):
-                z = max(z, space['z'] + space['height'])
-
-        return z
-
-    def boxes_overlap_xy(self, box1, box2):
-        return not (
-            box1['x'] + box1['width'] <= box2['x'] or
-            box2['x'] + box2['width'] <= box1['x'] or
-            box1['y'] + box1['length'] <= box2['y'] or
-            box2['y'] + box2['length'] <= box1['y']
-        )
-
-    def calculate_shuffling(self, position, box_dim, delivery_order, other_boxes):
-        x, y, z = position  # position에서 좌표 추출
-        current_box = {
-            'x': x, 'y': y, 'z': z,
-            'width': box_dim['width'],
-            'length': box_dim['length'],
-            'height': box_dim['height']
-        }
-        shuffling = 0
-        for other_box in other_boxes:
-            if (other_box['delivery_order'] > delivery_order and
-                other_box['z'] > z and
-                self.boxes_overlap_xy(current_box, other_box)):
-                shuffling += 1
-        return shuffling
-
-    def calculate_total_cost(self, routes):
-        num_vehicles_used = len([r for r in routes if len(r['route']) > 2])
-
-        fixed_cost = num_vehicles_used * self.fixed_cost
-        fuel_cost = sum(r['distance'] * self.fuel_cost_per_km / 1000 for r in routes)
-
-        shuffling_cost = sum(r['total_shuffling'] * self.shuffling_cost for r in routes)
-
-        routing_cost = fixed_cost + fuel_cost
-        unloading_cost = shuffling_cost
-        total_score = routing_cost + unloading_cost
-
-        return {
-            'total_score': total_score,
-            'routing_cost': routing_cost,
-            'fixed_cost': fixed_cost,
-            'fuel_cost': fuel_cost,
-            'unloading_cost': unloading_cost,
-            'shuffling_cost': shuffling_cost,
-            'num_vehicles': num_vehicles_used
-        }
-
-    def save_results(self, routes, cost_info, data):
-        result_data = []
-
-        for plan in self.final_vehicle_plans:
-            # 차량 시작 - Depot 행 추가 (차량당 한 번만)
-            depot_start_row = {
-                'Vehicle_ID': plan.vehicle_id,
-                'Route_Order': 0,  # Depot은 0번으로 시작
-                'Destination': 'Depot',
-                'Order_Number': '',
-                'Box_ID': '',
-                'Stacking_Order': '',
-                'Lower_Left_X': '',
-                'Lower_Left_Y': '',
-                'Lower_Left_Z': '',
-                'Longitude': '',  # 좌표 정보 제거
-                'Latitude': '',   # 좌표 정보 제거
-                'Box_Width': '',
-                'Box_Length': '',
-                'Box_Height': ''
-            }
-            output_data.append(depot_start_row)
-
-            # 차량의 배송 순서대로 목적지 정렬
-            route_order = 1
-
-            for dest in plan.route:
-                # 해당 목적지의 박스들 찾기
-                dest_boxes = [pb for pb in plan.packed_boxes if pb.box.destination == dest]
-
-                for packed_box in dest_boxes:
-                    box = packed_box.box
-                    dest_location = self.preprocessor.destinations[box.destination]
-
-                    # 프로젝트 요구사항에 맞는 컬럼 형식으로 데이터 생성
-                    # cm 단위 그대로 유지 (변환하지 않음)
-                    row_data = {
-                        'Vehicle_ID': plan.vehicle_id,
-                        'Route_Order': route_order,
-                        'Destination': box.destination,
-                        'Order_Number': box.order_number,
-                        'Box_ID': box.box_id,
-                        'Stacking_Order': packed_box.stacking_order,
-                        'Lower_Left_X': round(packed_box.x, 2),  # cm 단위 유지
-                        'Lower_Left_Y': round(packed_box.y, 2),  # cm 단위 유지
-                        'Lower_Left_Z': round(packed_box.z, 2),  # cm 단위 유지
-                        'Longitude': dest_location.longitude,
-                        'Latitude': dest_location.latitude,
-                        'Box_Width': round(box.width, 2),   # cm 단위 유지
-                        'Box_Length': round(box.length, 2), # cm 단위 유지
-                        'Box_Height': round(box.height, 2)  # cm 단위 유지
-                    }
-                    output_data.append(row_data)
-
-            route_order += 1
-            result_data.append({
-                'Vehicle_ID': vehicle_id,
-                'Route_Order': route_order,
-                'Destination': 'Depot',
-                'Order_Number': '',
-                'Box_ID': '',
-                'Stacking_Order': '',
-                'Lower_Left_X': '',
-                'Lower_Left_Y': '',
-                'Lower_Left_Z': '',
-                'Longitude': '',  # 좌표 정보 제거
-                'Latitude': '',   # 좌표 정보 제거
-                'Box_Width': '',
-                'Box_Length': '',
-                'Box_Height': ''
-            })
-
-        df = pd.DataFrame(result_data)
-        df.to_excel('Result.xlsx', sheet_name='Detailed Route Information', index=False)
-
-
-def main():
-    start_time = time.time()
-    if len(sys.argv) != 3:
-        print("Usage: python main.py data.json distance-data.txt")
-        sys.exit(1)
-
-    data_file = sys.argv[1]
-    distance_file = sys.argv[2]
-
-    vrp = VehicleRoutingProblem(data_file, distance_file)
-    data = vrp.create_data_model()
-    manager, routing, solution = vrp.solve_vrp(data)
-
+    solution = routing.SolveWithParameters(search_params)
+    route = []
     if solution:
-        routes, total_distance = vrp.extract_routes(manager, routing, solution, data)
-        routes = vrp.perform_3d_packing(routes, data)
-        cost_info = vrp.calculate_total_cost(routes)
-        vrp.save_results(routes, cost_info, data)
-        elapsed = time.time() - start_time
-        total_orders = len(vrp.data['orders'])
-        processed_orders = sum(len(order['orders']) for order in routes)
-        throughput = processed_orders / total_orders * 100 if total_orders > 0 else 0
-        # 셔플링 횟수 합계 계산
-        total_shuffling_count = sum(r.get('total_shuffling', 0) for r in routes)
-        print(f"총 주문 수: {total_orders}")
-        print(f"처리된 주문 수: {processed_orders}")
-        print(f"처리율: {throughput:.2f}%")
-        print(f"라우팅 비용: {cost_info['routing_cost']:,}원")
-        print(f"하차 비용: {cost_info['unloading_cost']:,}원 (셔플링 횟수: {total_shuffling_count}회)")
-        print(f"총 비용: {cost_info['total_score']:,}원")
-        print(f"실행 시간: {elapsed:.2f}초")
-    else:
-        print("해를 찾지 못했습니다.")
-        sys.exit(1)
+        index = routing.Start(0)
+        while not routing.IsEnd(index):
+            route.append(locations[manager.IndexToNode(index)])
+            index = solution.Value(routing.NextVar(index))
+        route.append(locations[manager.IndexToNode(index)])
+    return route
 
-if __name__ == '__main__':
-    main()
+# [6] 전체 최적화 함수
+def solve(data, dist_matrix, locations, idx_map):
+    orders = data["orders"]
+    for o in orders:
+        o["volume"] = calculate_order_volume(o)
+
+    coords = get_coords_map(data)
+    start_time = time.time()
+    results = []
+    vehicle_id = 0
+    current_orders = orders.copy()
+
+    while current_orders:
+        placed, volume, packed = [], 0, []
+        for o in sorted(current_orders, key=lambda x: -x["volume"]):
+            pos = find_position_fill_priority(placed, o["dimension"])
+            if pos and volume + o["volume"] <= MAX_CAPACITY:
+                o.update(pos)
+                placed.append(pos)
+                packed.append(o)
+                volume += o["volume"]
+
+        if not packed:
+            break
+
+        dests = list(set([p["destination"] for p in packed]))
+        route = get_vrp_route(dist_matrix, idx_map, locations, "Depot", dests)
+        dest_rank = {d: i for i, d in enumerate(route)}
+
+        results.append({"Vehicle_ID": vehicle_id, "Route_Order": 0, "Destination": "Depot",
+                        "Order_Number": "", "Box_ID": "", "Stacking_Order": "",
+                        "X": 0, "Y": 0, "Z": 0, "Longitude": coords["Depot"]["longitude"],
+                        "Latitude": coords["Depot"]["latitude"], "Width": 0, "Length": 0, "Height": 0})
+
+        for i, o in enumerate(packed):
+            results.append({
+                "Vehicle_ID": vehicle_id,
+                "Route_Order": dest_rank[o["destination"]] + 1,
+                "Destination": o["destination"],
+                "Order_Number": o["order_number"],
+                "Box_ID": o["box_id"],
+                "Stacking_Order": i,
+                "X": o["X"], "Y": o["Y"], "Z": o["Z"],
+                "Longitude": coords[o["destination"]]["longitude"],
+                "Latitude": coords[o["destination"]]["latitude"],
+                "Width": o["dimension"]["width"],
+                "Length": o["dimension"]["length"],
+                "Height": o["dimension"]["height"]
+            })
+
+        results.append({"Vehicle_ID": vehicle_id, "Route_Order": len(dests)+1, "Destination": "Depot",
+                        "Order_Number": "", "Box_ID": "", "Stacking_Order": "",
+                        "X": 0, "Y": 0, "Z": 0, "Longitude": coords["Depot"]["longitude"],
+                        "Latitude": coords["Depot"]["latitude"], "Width": 0, "Length": 0, "Height": 0})
+
+        vehicle_id += 1
+        current_orders = [o for o in current_orders if o not in packed]
+
+    df = pd.DataFrame(results)
+
+    total_distance = 0
+    for v in range(vehicle_id):
+        df_v = df[df["Vehicle_ID"] == v].sort_values("Route_Order")
+        route = df_v["Destination"].tolist()
+        for i in range(len(route) - 1):
+            total_distance += dist_matrix[idx_map[route[i]]][idx_map[route[i+1]]]
+
+    fuel = int((total_distance / 1000) * FUEL_COST_PER_KM)
+    fixed = vehicle_id * FIXED_COST_PER_VEHICLE
+    shuffle = sum(df[df["Stacking_Order"] != ""].groupby("Vehicle_ID", group_keys=False).apply(
+        lambda g: g["Z"].rank(method="dense", ascending=False).sum()).astype(int)) * SHUFFLE_COST_PER_BOX
+
+    exec_time = round(time.time() - start_time, 2)
+    print(f"처리율: {len(df[df['Box_ID'] != ''])} / {len(data['orders'])} = {round(len(df[df['Box_ID'] != ''])/len(data['orders'])*100, 2)}%")
+    print(f"차량 수: {vehicle_id}")
+    print(f"고정비용: {fixed:,}원")
+    print(f"유류비: {fuel:,}원")
+    print(f"셔플링비: {shuffle:,}원")
+    print(f"총 비용: {fixed + fuel + shuffle:,}원")
+    print(f"실행 소요 시간: {exec_time}초")
+
+    save_result_excel(df)
+
+# [7] 실행
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python main12.py data.json distance-data.txt")
+    else:
+        data = load_json(sys.argv[1])
+        matrix, locs, idmap = load_distance_data(sys.argv[2])
+        solve(data, matrix, locs, idmap)
